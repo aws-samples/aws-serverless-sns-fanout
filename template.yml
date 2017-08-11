@@ -1,0 +1,114 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: Serverless Fanout using Amazon SNS and Amazon Lambda
+Parameters:
+  S3BucketName:
+    Type: String
+  SnsTopicName:
+    Type: String
+
+Resources:
+  MediaInfoFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: media_info.lambda_handler
+      Runtime: python2.7
+      FunctionName: media_info
+
+  MediaInfoFunctionInvokePermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref MediaInfoFunction
+      Principal: sns.amazonaws.com
+
+  TranscodeAudioFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: transcode_audio.lambda_handler
+      Runtime: python2.7
+      FunctionName: transcode_audio
+
+  TranscodeAudioFunctionInvokePermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref TranscodeAudioFunction
+      Principal: sns.amazonaws.com
+
+  FanoutFunction:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: fanout.lambda_handler
+      Runtime: python2.7
+      FunctionName: fanout
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Resource: '*'
+              Action:
+                - 'lambda:InvokeFunction'
+
+  FanoutFunctionsInvokePermission:
+    Type: 'AWS::Lambda::Permission'
+    Properties:
+      Action: 'lambda:InvokeFunction'
+      FunctionName: !Ref FanoutFunction
+      Principal: s3.amazonaws.com
+
+  SnsTopic:
+    Type: 'AWS::SNS::Topic'
+    Properties:
+      TopicName: !Ref SnsTopicName
+      Subscription:
+        - Protocol: lambda
+          Endpoint: !GetAtt MediaInfoFunction.Arn
+        - Protocol: lambda
+          Endpoint: !GetAtt TranscodeAudioFunction.Arn
+
+  SNSTopicPolicy:
+    Type: 'AWS::SNS::TopicPolicy'
+    Properties:
+      Topics:
+        - !Ref SnsTopic
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action: 'sns:Publish'
+            Resource: !Ref SnsTopic
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Sub "arn:aws:s3:::${S3BucketName}"
+            Principal:
+              AWS: '*'
+
+  S3Bucket:
+    Type: 'AWS::S3::Bucket'
+    DependsOn: SnsTopic
+    Properties:
+      BucketName: !Ref S3BucketName
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Function: !GetAtt FanoutFunction.Arn
+            Event: 's3:ObjectCreated:*'
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: 'uploads/lambda/'
+        TopicConfigurations:
+          - Topic: !Ref SnsTopic
+            Event: 's3:ObjectCreated:*'
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: 'uploads/sns/'
+
+Outputs:
+  S3Bucket:
+    Value: !Ref S3Bucket
+  SnsTopic:
+    Value: !Ref SnsTopic
